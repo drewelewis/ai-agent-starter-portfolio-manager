@@ -1,0 +1,37 @@
+# Microsoft Agent Framework (pinned for stability)
+agent-framework-azure-ai==1.0.0b260107
+agent-framework-core==1.0.0b260107
+
+# FastAPI and Web Server
+fastapi
+uvicorn[standard]
+pydantic
+
+# Agent HTTP Server support (legacy - keeping for reference)
+azure-ai-agentserver-core==1.0.0b10
+azure-ai-agentserver-agentframework==1.0.0b10
+
+# Debugging support
+debugpy
+agent-dev-cli
+
+# Azure authentication
+azure-identity
+
+# GitHub integration
+PyGithub
+
+# PostgreSQL
+psycopg2-binary
+asyncpg
+
+# Environment variables
+python-dotenv
+
+# Testing
+pytest
+pytest-asyncio
+aiohttp
+
+# Terminal colors
+colorama

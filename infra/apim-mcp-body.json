@@ -1,0 +1,10 @@
+{
+  "properties": {
+    "displayName": "Trading Platform MCP Server",
+    "description": "MCP server exposing Trading Platform API tools for portfolio event ledger operations.",
+    "path": "trading-platform-mcp",
+    "protocols": ["https"],
+    "apiType": "mcp",
+    "sourceApiId": "/subscriptions/d201ebeb-c470-4a6f-82d5-c2f95bb0dc1e/resourceGroups/ai-learning-rg/providers/Microsoft.ApiManagement/service/ai-learning-apim/apis/trading-platform-api"
+  }
+}

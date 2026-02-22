@@ -1,0 +1,60 @@
+(.venv) PS C:\gitrepos\ai-agent-starter-portofolio-manager> python test_mcp.py
+============================================================
+  Trading Platform MCP Server Test
+  URL: https://ai-learning-apim.azure-api.net/trading-platform-mcp-server/mcp
+============================================================
+  Connected — MCP session initialized
+
+------------------------------------------------------------
+MCP tools advertised (11):
+  - accountEvents: All ledger events (BUY, SELL, PRICE) for an account, newest first.
+  - agentStatus: Trading Platform Agent capabilities and registered tools.
+  - chat: Natural-language chat with the Trading Platform Agent.
+  - clearSession: Clear the conversation history for a session.
+  - health: Service health including database connectivity.
+  - insertEvent: Insert a new portfolio event (BUY, SELL, or PRICE observation) into th
+  - latestPrice: Most recently observed market price for a ticker.
+  - portfolioSummary: Net share position, net cost basis, and last observed price per ticker
+  - root: Root
+  - tickerEvents: All ledger events for a ticker across all accounts, newest first.
+  - tradeHistory: BUY / SELL trade history for an account, optionally filtered by type.
+------------------------------------------------------------
+
+[health] Checking service health...
+  ✅ {
+  "status": "healthy",
+  "service": "trading-platform-api",
+  "version": "1.0.0",
+  "agent": "ready",
+  "database": "connected",
+  "framework": "Microsoft Agent Framework"
+}
+
+[agentStatus] Fetching registered tools...
+  ✅ 7 tool(s): get_events_by_account, get_events_by_ticker, get_portfolio_summary, get_latest_price, get_trade_history
+
+[portfolioSummary] Account A100...
+  ✅ 1 ticker(s)
+     [('account_id', 'A100'), ('ticker_symbol', 'MSFT'), ('net_shares', 175.0), ('net_cost', 52830.0)]
+
+[latestPrice] Ticker MSFT...
+  ✅ {
+  "ticker_symbol": "MSFT",
+  "price_per_share": 416.1,
+  "currency": "USD",
+  "event_ts": "2026-02-20T15:00:00+00:00"
+}
+
+[tradeHistory] Account A100...
+  ✅ 67 trade(s)
+     [BUY] MSFT x10.0 @ 349.5
+     [SELL] MSFT x5.0 @ 397.0
+
+[accountEvents] Account A100...
+  ✅ 100 event(s): {'BUY': 34, 'PRICE': 33, 'SELL': 33}
+
+[tickerEvents] Ticker MSFT...
+  ✅ 100 event(s) across 2 account(s)
+
+[chat] Asking agent about account A100...
+  ✅ Agent replied (212 chars): Hello! How can I assist you with your trading platform portfolio today? If you’d like a portfolio summary, trade history, or help analyzing your trades, please provide your account ID or a specific ti...

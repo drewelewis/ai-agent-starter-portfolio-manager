@@ -1,0 +1,63 @@
+services:
+
+  # AI Agent Starter - FastAPI server with Microsoft Agent Framework
+  ai-agent-starter-api:
+    image: drewl/ai-agent-starter-portfolio-manager:latest
+    build:
+      context: .
+      dockerfile: dockerfile
+    container_name: ai-agent-starter-portfolio-manager-api
+    ports:
+      - "8989:8989"
+    environment:
+      # Azure Configuration (use .env file or pass these in)
+      - AZURE_PROJECT_ENDPOINT=${AZURE_PROJECT_ENDPOINT}
+      - MODEL_DEPLOYMENT_NAME=${MODEL_DEPLOYMENT_NAME}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
+      
+      # Server Configuration
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8989
+      - SERVICE_NAME=ai-agent-starter-portfolio-manager
+      - SERVICE_VERSION=1.0.0
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL Database (for future use)
+  ai-agent-starter-portfolio-manager-postgres:
+    image: postgres:17.5
+    container_name: ai-agent-starter-portfolio-manager-postgres
+    ports:
+      - "5000:5432"
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+  # Adminer Database Management UI
+  ai-agent-starter-portfolio-manager-adminer:
+    image: adminer
+    container_name: ai-agent-starter-portfolio-manager-adminer
+    restart: always
+    ports:
+      - 8888:8080
+
+
+  
+  
+volumes:
+  postgres_data:
+
+

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PortfolioEventLedger",
+  "description": "Event-based portfolio ledger for trades and market price observations",
+  "type": "object",
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "description": "Logical account identifier"
+    },
+    "ticker_symbol": {
+      "type": "string",
+      "description": "Equity ticker symbol (uppercase)"
+    },
+    "event_ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event timestamp in ISO 8601 UTC"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "BUY",
+        "SELL",
+        "PRICE"
+      ],
+      "description": "Type of portfolio or market event"
+    },
+    "shares": {
+      "type": "number",
+      "description": "Number of shares (0 for PRICE events)"
+    },
+    "price_per_share": {
+      "type": "number",
+      "description": "Executed trade price or observed market price"
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO currency code (e.g., USD)"
+    },
+    "source": {
+      "type": "string",
+      "description": "Origin of the event (broker, market feed, synthetic)"
+    }
+  },
+  "required": [
+    "account_id",
+    "ticker_symbol",
+    "event_ts",
+    "event_type",
+    "shares",
+    "price_per_share",
+    "currency",
+    "source"
+  ],
+  "additionalProperties": false
+}
