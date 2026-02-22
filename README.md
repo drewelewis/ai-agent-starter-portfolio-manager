@@ -69,7 +69,7 @@ The REST API exposes structured query endpoints and a natural-language **chat** 
 ┌──────────────────────────────────────────────────────────┐
 │  Azure Container Apps                                    │
 │  ai-learning-aca  (East US)                              │
-│  min-replicas: 0  |  ingress: external  |  port: 8989   │
+│  min-replicas: 1  |  ingress: external  |  port: 8989   │
 │                                                          │
 │  Trading Platform FastAPI (Python 3.11)                  │
 │  ├── GET  /health                                        │
