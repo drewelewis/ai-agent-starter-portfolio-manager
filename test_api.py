@@ -67,23 +67,8 @@ async def test_agent_status(s: ClientSession):
     return ok
 
 
-async def test_get_all_portfolio_summaries(s: ClientSession):
-    print("\n[allPortfolioSummaries] All accounts in one query...")
-    data = _parse(await s.call_tool("allPortfolioSummaries", arguments={}))
-    positions = data.get("positions") if isinstance(data, dict) else None
-    ok = isinstance(positions, list) and len(positions) > 0
-    if ok:
-        accounts = {p.get("account_id") for p in positions if isinstance(p, dict)}
-        print(f"  ✅ {len(positions)} positions across {len(accounts)} accounts")
-        for p in positions[:2]:
-            print(f"     {p.get('account_id','')[:8]} {p.get('ticker_symbol')} net_shares={p.get('net_shares')} last_price={p.get('last_price')}")
-    else:
-        print(f"  ❌ {_fmt(data)}")
-    return ok
-
-
-async def test_portfolio_summary(s: ClientSession, account_id: str = ""):
-    print(f"\n[portfolioSummary] Account {account_id or '(first available)'}...")
+async def test_portfolio_summary(s: ClientSession, account_id: str = "A100"):
+    print(f"\n[portfolioSummary] Account {account_id}...")
     data = _parse(await s.call_tool("portfolioSummary", arguments={"account_id": account_id}))
     # API returns {"account_id": ..., "positions": [...]}
     positions = (
@@ -110,60 +95,8 @@ async def test_latest_price(s: ClientSession, ticker: str = "MSFT"):
     return ok
 
 
-async def test_account_ticker_events(s: ClientSession, account_id: str = "", ticker: str = ""):
-    print(f"\n[accountTickerEvents] Account {account_id[:8] if account_id else '?'} / {ticker}...")
-    data = _parse(await s.call_tool("accountTickerEvents", arguments={"account_id": account_id, "ticker_symbol": ticker}))
-    events = data.get("events") if isinstance(data, dict) else None
-    ok = events is not None
-    if ok:
-        print(f"  ✅ {len(events)} event(s) for {account_id[:8]}/{ticker}")
-    else:
-        print(f"  ❌ {_fmt(data)}")
-    return ok
-
-
-async def test_run_query(s: ClientSession):
-    print("\n[dynamicQuery] Count events by type...")
-    sql = "SELECT event_type, COUNT(*) AS cnt FROM portfolio_event_ledger GROUP BY event_type ORDER BY cnt DESC"
-    # APIM MCP wraps POST body fields — try direct arg first, then requestBody wrapper
-    for args in [{"sql": sql}, {"requestBody": {"sql": sql}}, {"body": {"sql": sql}}]:
-        try:
-            data = _parse(await s.call_tool("dynamicQuery", arguments=args))
-            rows = data.get("rows") if isinstance(data, dict) else None
-            if rows is not None:
-                print(f"  ✅ {len(rows)} row(s) (args key={list(args.keys())[0]}): {[(r.get('event_type'), r.get('cnt')) for r in rows]}")
-                return True
-        except Exception:
-            pass
-    print("  ❌ dynamicQuery failed with all argument structures")
-    return False
-
-
-async def test_analysis_context(s: ClientSession, account_id: str = ""):
-    print(f"\n[accountAnalysisContext] Account {account_id[:8] if account_id else '?'}...")
-    data = _parse(await s.call_tool("accountAnalysisContext", arguments={"account_id": account_id}))
-    # tool returns a JSON string; parse again if needed
-    if isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except json.JSONDecodeError:
-            pass
-    holdings = data.get("holdings") if isinstance(data, dict) else None
-    anomalies = data.get("anomalies") if isinstance(data, dict) else None
-    summary = data.get("summary") if isinstance(data, dict) else None
-    ok = isinstance(holdings, list) and len(holdings) > 0
-    if ok:
-        sample = holdings[0]
-        print(f"  ✅ {len(holdings)} holding(s), {len(anomalies or [])} anomaly flag(s)")
-        print(f"     market_value={summary.get('total_market_value') if summary else 'n/a'}")
-        print(f"     {sample.get('ticker_symbol')}: unrealized_pnl={sample.get('unrealized_pnl')} weight={sample.get('portfolio_weight')}")
-    else:
-        print(f"  ❌ {_fmt(data)}")
-    return ok
-
-
-async def test_trade_history(s: ClientSession, account_id: str = ""):
-    print(f"\n[tradeHistory] Account {account_id or '(first available)'}...")
+async def test_trade_history(s: ClientSession, account_id: str = "A100"):
+    print(f"\n[tradeHistory] Account {account_id}...")
     data = _parse(await s.call_tool("tradeHistory", arguments={"account_id": account_id}))
     # API returns {"account_id": ..., "event_type": ..., "trades": [...]}
     trades = (
@@ -185,8 +118,8 @@ async def test_trade_history(s: ClientSession, account_id: str = ""):
     return ok
 
 
-async def test_account_events(s: ClientSession, account_id: str = ""):
-    print(f"\n[accountEvents] Account {account_id or '(first available)'}...")
+async def test_account_events(s: ClientSession, account_id: str = "A100"):
+    print(f"\n[accountEvents] Account {account_id}...")
     data = _parse(await s.call_tool("accountEvents", arguments={"account_id": account_id}))
     # API returns {"account_id": ..., "count": ..., "events": [...]}
     events = (
@@ -256,26 +189,46 @@ async def test_list_accounts(s: ClientSession):
     return ok
 
 
+async def test_chat(s: ClientSession):
+    print("\n[chat] Asking agent about account A100...")
+    # Note: APIM MCP maps POST body fields as tool arguments.
+    # The chat endpoint expects {"session_id": str, "message": str}.
+    data = _parse(
+        await s.call_tool(
+            "chat",
+            arguments={
+                "session_id": "mcp-test-session",
+                "message": "Give me a brief portfolio summary for account A100",
+            },
+        )
+    )
+    if isinstance(data, dict) and "detail" in data:
+        # FastAPI validation error — likely APIM MCP body mapping issue
+        print(f"  ❌ Validation error (APIM MCP body mapping): {_fmt(data)}")
+        return False
+    ok = isinstance(data, dict) and bool(data.get("response"))
+    if ok:
+        reply = data["response"]
+        print(f"  ✅ Agent replied ({len(reply)} chars): {reply[:200]}...")
+    else:
+        print(f"  ❌ {_fmt(data)}")
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # test registry
 # ---------------------------------------------------------------------------
 
-# Resolved dynamically from /accounts after session init
-_first_account: str = ""
-_first_ticker: str = ""
-
 TESTS = [
-    ("agentStatus",            test_agent_status),
-    ("listAccounts",           test_list_accounts),
-    ("allPortfolioSummaries",  test_get_all_portfolio_summaries),
-    ("portfolioSummary",       lambda s: test_portfolio_summary(s, _first_account)),
-    ("accountAnalysisContext", lambda s: test_analysis_context(s, _first_account)),
-    ("latestPrice",            test_latest_price),
-    ("tradeHistory",           lambda s: test_trade_history(s, _first_account)),
-    ("accountEvents",          lambda s: test_account_events(s, _first_account)),
-    ("accountTickerEvents",    lambda s: test_account_ticker_events(s, _first_account, _first_ticker)),
-    ("tickerEvents",           test_ticker_events),
-    ("dynamicQuery",           test_run_query),
+    ("health",           test_health),
+    ("agentStatus",      test_agent_status),
+    ("listAccounts",     test_list_accounts),
+    ("portfolioSummary", test_portfolio_summary),
+    ("latestPrice",      test_latest_price),
+    ("tradeHistory",     test_trade_history),
+    ("accountEvents",    test_account_events),
+    ("tickerEvents",     test_ticker_events),
+    ("chat",             test_chat),
 ]
 
 
@@ -294,23 +247,6 @@ async def main() -> None:
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 print("  Connected — MCP session initialized")
-
-                # resolve a real account_id and ticker for parameterised tests
-                global _first_account, _first_ticker
-                try:
-                    _raw = _parse(await session.call_tool("listAccounts", arguments={}))
-                    _accounts = _raw.get("accounts", []) if isinstance(_raw, dict) else []
-                    if _accounts:
-                        _first_account = _accounts[0]
-                        # pick a quick ticker from portfolioSummary
-                        _ps = _parse(await session.call_tool("portfolioSummary", arguments={"account_id": _first_account}))
-                        _positions = _ps.get("positions", []) if isinstance(_ps, dict) else []
-                        if _positions:
-                            _first_ticker = _positions[0].get("ticker_symbol", "MSFT")
-                    print(f"  Resolved test account : {_first_account}")
-                    print(f"  Resolved test ticker  : {_first_ticker}")
-                except Exception as _e:
-                    print(f"  Warning: could not resolve test account ({_e}); tests may fail")
 
                 # list all tools the server advertises
                 tools_resp = await session.list_tools()

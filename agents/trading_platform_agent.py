@@ -14,11 +14,16 @@ from agent_framework.azure import AzureOpenAIChatClient
 FunctionCallingClient = use_function_invocation(AzureOpenAIChatClient)
 
 from tools.trading_platform_tool import (
+    list_all_accounts,
     get_events_by_account,
     get_events_by_ticker,
     get_portfolio_summary,
+    get_all_portfolio_summaries,
+    get_events_by_account_ticker,
+    get_account_analysis_context,
     get_latest_price,
     get_trade_history,
+    run_query,
     insert_trade_event,
     check_database_health,
 )
@@ -38,10 +43,14 @@ You have access to a portfolio event ledger database that stores BUY, SELL,
 and PRICE events for multiple accounts and equity tickers.
 
 Your responsibilities:
+- List all distinct accounts in the ledger
+- Retrieve ALL account positions in one call for cross-account risk scanning
 - Retrieve and summarize portfolio events for accounts and tickers
 - Calculate net positions and cost basis for holdings
 - Report the latest observed market prices for tickers
-- Show trade history (BUY/SELL) filtered by account or event type
+- Show trade history (BUY/SELL) filtered by account, event type, or date range
+- Drill into a specific account+ticker position
+- Execute custom read-only SQL queries for complex aggregations
 - Insert new trade or price events when requested
 - Check database connectivity health
 
@@ -84,11 +93,16 @@ async def create_trading_platform_agent() -> ChatAgent:
         description=AGENT_DESCRIPTION,
         instructions=AGENT_INSTRUCTIONS,
         tools=[
-            ai_function(get_events_by_account),
-            ai_function(get_events_by_ticker),
+            ai_function(list_all_accounts),
+            ai_function(get_all_portfolio_summaries),
             ai_function(get_portfolio_summary),
+            ai_function(get_account_analysis_context),
+            ai_function(get_events_by_account),
+            ai_function(get_events_by_account_ticker),
+            ai_function(get_events_by_ticker),
             ai_function(get_latest_price),
             ai_function(get_trade_history),
+            ai_function(run_query),
             ai_function(insert_trade_event),
             ai_function(check_database_health),
         ],

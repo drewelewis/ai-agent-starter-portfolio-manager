@@ -3,17 +3,21 @@ Trading Platform FastAPI
 REST API that wraps the TradingPlatformAgent for portfolio event ledger operations.
 
 Endpoints:
-    GET  /health                          - Service health + DB connectivity
-    GET  /                                - API info and endpoint map
-    POST /chat                            - Natural-language chat with the agent
-    POST /clear_session                   - Clear conversation history for a session
-    GET  /portfolio/{account_id}          - Portfolio summary for an account
-    GET  /portfolio/{account_id}/trades   - Trade history (BUY/SELL) for an account
-    GET  /portfolio/{account_id}/events   - All events for an account
-    GET  /ticker/{ticker_symbol}/price    - Latest observed price for a ticker
-    GET  /ticker/{ticker_symbol}/events   - All events for a ticker
-    POST /events                          - Insert a new portfolio event
-    GET  /agent/status                    - Agent tools and capabilities
+    GET  /health                                        - Service health + DB connectivity
+    GET  /                                              - API info and endpoint map
+    POST /chat                                          - Natural-language chat with the agent
+    POST /clear_session                                 - Clear conversation history for a session
+    GET  /accounts                                      - List all distinct account IDs
+    GET  /portfolio/summary/all                         - Net positions for ALL accounts (one query)
+    GET  /portfolio/{account_id}                        - Portfolio summary for one account
+    GET  /portfolio/{account_id}/trades                 - Trade history (BUY/SELL) for an account
+    GET  /portfolio/{account_id}/events                 - All events for an account
+    GET  /portfolio/{account_id}/{ticker_symbol}/events - Events for a specific account+ticker
+    GET  /ticker/{ticker_symbol}/price                  - Latest observed price for a ticker
+    GET  /ticker/{ticker_symbol}/events                 - All events for a ticker
+    POST /events                                        - Insert a new portfolio event
+    POST /query                                         - Execute a read-only SQL SELECT
+    GET  /agent/status                                  - Agent tools and capabilities
 """
 
 import os
@@ -98,6 +102,14 @@ class InsertEventRequest(BaseModel):
     source:          str   = Field("api",  description="Origin of the event")
 
 
+class QueryRequest(BaseModel):
+    sql: str = Field(
+        ...,
+        description="A read-only PostgreSQL SELECT statement against portfolio_event_ledger",
+        example="SELECT account_id, COUNT(*) AS trades FROM portfolio_event_ledger WHERE event_type IN ('BUY','SELL') GROUP BY account_id ORDER BY trades DESC",
+    )
+
+
 # ── Lifecycle ──────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -148,16 +160,20 @@ async def root():
         "version": SERVICE_VERSION,
         "docs":    "/docs",
         "endpoints": {
-            "health":          "GET  /health",
-            "chat":            "POST /chat",
-            "clear_session":   "POST /clear_session",
-            "portfolio":       "GET  /portfolio/{account_id}",
-            "trades":          "GET  /portfolio/{account_id}/trades",
-            "events_account":  "GET  /portfolio/{account_id}/events",
-            "latest_price":    "GET  /ticker/{ticker_symbol}/price",
-            "events_ticker":   "GET  /ticker/{ticker_symbol}/events",
-            "insert_event":    "POST /events",
-            "agent_status":    "GET  /agent/status",
+            "health":               "GET  /health",
+            "chat":                 "POST /chat",
+            "clear_session":        "POST /clear_session",
+            "accounts":             "GET  /accounts",
+            "all_summaries":        "GET  /portfolio/summary/all",
+            "portfolio":            "GET  /portfolio/{account_id}",
+            "trades":               "GET  /portfolio/{account_id}/trades",
+            "events_account":       "GET  /portfolio/{account_id}/events",
+            "events_account_ticker":"GET  /portfolio/{account_id}/{ticker_symbol}/events",
+            "latest_price":         "GET  /ticker/{ticker_symbol}/price",
+            "events_ticker":        "GET  /ticker/{ticker_symbol}/events",
+            "insert_event":         "POST /events",
+            "query":                "POST /query",
+            "agent_status":         "GET  /agent/status",
         },
     }
 
@@ -205,7 +221,36 @@ async def clear_session(request: ClearSessionRequest):
     return {"status": "cleared", "session_id": request.session_id}
 
 
+# ── Accounts endpoint ─────────────────────────────────────────────────────────
+@app.get("/accounts")
+async def list_accounts():
+    """Return a sorted list of all distinct account IDs in the ledger."""
+    _require_db()
+    try:
+        accounts = await db_ops.get_all_accounts()
+        return {"count": len(accounts), "accounts": accounts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Structured portfolio endpoints ─────────────────────────────────────────────
+@app.get("/portfolio/summary/all", operation_id="getAllPortfolioSummaries")
+async def all_portfolio_summaries():
+    """
+    Net positions for ALL accounts in a single query.
+    Each row includes: account_id, ticker_symbol, net_shares, net_cost,
+    last_price (chronologically latest, not max), last_price_ts, last_event_ts.
+    Ideal for cross-account risk scanning — a single call replaces 25 individual
+    portfolioSummary calls.
+    """
+    _require_db()
+    try:
+        rows = await db_ops.get_all_portfolio_summaries()
+        return {"count": len(rows), "positions": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/portfolio/{account_id}")
 async def portfolio_summary(account_id: str):
     """
@@ -228,15 +273,17 @@ async def portfolio_summary(account_id: str):
 async def trade_history(
     account_id: str,
     event_type: Optional[str] = Query(None, description="Filter: BUY or SELL"),
-    limit:      int            = Query(100,  description="Max rows to return"),
+    start:      Optional[str] = Query(None, description="Start timestamp filter (ISO 8601)"),
+    end:        Optional[str] = Query(None, description="End timestamp filter (ISO 8601)"),
 ):
-    """BUY / SELL trade history for an account, optionally filtered by type."""
+    """BUY / SELL trade history for an account, optionally filtered by type and/or date range."""
     _require_db()
     try:
         rows = await db_ops.get_trade_history(
             account_id,
             event_type.upper() if event_type else None,
-            limit,
+            start or None,
+            end   or None,
         )
         return {"account_id": account_id, "event_type": event_type, "trades": rows}
     except Exception as e:
@@ -246,13 +293,39 @@ async def trade_history(
 @app.get("/portfolio/{account_id}/events")
 async def account_events(
     account_id: str,
-    limit: int = Query(100, description="Max rows to return"),
+    start: Optional[str] = Query(None, description="Start timestamp filter (ISO 8601)"),
+    end:   Optional[str] = Query(None, description="End timestamp filter (ISO 8601)"),
 ):
-    """All ledger events (BUY, SELL, PRICE) for an account, newest first."""
+    """All ledger events (BUY, SELL, PRICE) for an account, newest first.
+    Optionally filter by date range."""
     _require_db()
     try:
-        rows = await db_ops.get_events_by_account(account_id, limit)
+        rows = await db_ops.get_events_by_account(account_id, start or None, end or None)
         return {"account_id": account_id, "count": len(rows), "events": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/portfolio/{account_id}/{ticker_symbol}/events", operation_id="getAccountTickerEvents")
+async def account_ticker_events(
+    account_id:    str,
+    ticker_symbol: str,
+    start: Optional[str] = Query(None, description="Start timestamp filter (ISO 8601)"),
+    end:   Optional[str] = Query(None, description="End timestamp filter (ISO 8601)"),
+):
+    """All ledger events for a specific account + ticker combination, newest first.
+    More targeted than /portfolio/{account_id}/events when drilling into one position."""
+    _require_db()
+    try:
+        rows = await db_ops.get_events_by_account_and_ticker(
+            account_id, ticker_symbol.upper(), start or None, end or None
+        )
+        return {
+            "account_id":    account_id,
+            "ticker_symbol": ticker_symbol.upper(),
+            "count":         len(rows),
+            "events":        rows,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -276,13 +349,63 @@ async def latest_price(ticker_symbol: str):
 @app.get("/ticker/{ticker_symbol}/events")
 async def ticker_events(
     ticker_symbol: str,
-    limit: int = Query(100, description="Max rows to return"),
+    start: Optional[str] = Query(None, description="Start timestamp filter (ISO 8601)"),
+    end:   Optional[str] = Query(None, description="End timestamp filter (ISO 8601)"),
 ):
-    """All ledger events for a ticker across all accounts, newest first."""
+    """All ledger events for a ticker across all accounts, newest first.
+    Optionally filter by date range."""
     _require_db()
     try:
-        rows = await db_ops.get_events_by_ticker(ticker_symbol.upper(), limit)
+        rows = await db_ops.get_events_by_ticker(ticker_symbol.upper(), start or None, end or None)
         return {"ticker_symbol": ticker_symbol.upper(), "count": len(rows), "events": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Analysis context (pre-computed for o1 analyst agent) ─────────────────────
+@app.get("/portfolio/{account_id}/analysis-context", operation_id="getAccountAnalysisContext")
+async def account_analysis_context(account_id: str):
+    """
+    Return a fully pre-computed analysis context for one account including
+    avg_cost_per_share, unrealized_pnl, portfolio_weight per position, and
+    a pre-flagged anomalies list (OVERSELL, MISSING_PRICE, STALE_PRICE).
+    Designed as the input payload for the InvestmentPortfolioAnalysisAgent.
+    """
+    from datetime import datetime, timezone
+    _require_db()
+    try:
+        result = await db_ops.get_account_analysis_context(account_id)
+        if not result.get("holdings"):
+            raise HTTPException(status_code=404, detail=f"No holdings found for account '{account_id}'.")
+        # Compute anomalies (same logic as the tool wrapper)
+        STALE_DAYS = 30
+        now = datetime.now(timezone.utc)
+        anomalies = []
+        for h in result["holdings"]:
+            ticker = h["ticker_symbol"]
+            if (h["net_shares"] or 0) < 0:
+                anomalies.append({"flag": "OVERSELL", "ticker": ticker,
+                                   "details": f"net_shares={h['net_shares']} — short or data error"})
+            if h["last_price"] is None:
+                anomalies.append({"flag": "MISSING_PRICE", "ticker": ticker,
+                                   "details": "No PRICE events found for this ticker"})
+            elif h.get("last_price_ts"):
+                try:
+                    ts_str = str(h["last_price_ts"]).replace("Z", "+00:00")
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age = (now - ts).days
+                    if age >= STALE_DAYS:
+                        anomalies.append({"flag": "STALE_PRICE", "ticker": ticker,
+                                           "details": f"Last price is {age} days old (>{STALE_DAYS}d threshold)"})
+                except ValueError:
+                    pass
+        result["anomalies"] = anomalies
+        result["as_of_date"] = now.isoformat()
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -311,6 +434,26 @@ async def insert_event(event: InsertEventRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Dynamic read-only SQL query ─────────────────────────────────────────────────
+@app.post("/query", operation_id="runQuery")
+async def dynamic_query(request: QueryRequest):
+    """
+    Execute a read-only SELECT statement against the portfolio_event_ledger table.
+    Only SELECT statements are accepted. DDL, DML, and system-table access are blocked.
+
+    Example body:
+        { "sql": "SELECT account_id, COUNT(*) AS trades FROM portfolio_event_ledger WHERE event_type IN ('BUY','SELL') GROUP BY account_id ORDER BY trades DESC" }
+    """
+    _require_db()
+    try:
+        rows = await db_ops.execute_read_query(request.sql)
+        return {"row_count": len(rows), "columns": list(rows[0].keys()) if rows else [], "rows": rows}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Agent status ───────────────────────────────────────────────────────────────
 @app.get("/agent/status")
 async def agent_status():
@@ -322,20 +465,30 @@ async def agent_status():
             "AI agent for portfolio event ledger queries and trade operations."
         ),
         "tools": [
-            {"name": "get_events_by_account",         "description": "All events for an account"},
-            {"name": "get_events_by_ticker",           "description": "All events for a ticker"},
-            {"name": "get_portfolio_summary",          "description": "Net position + cost basis per ticker"},
-            {"name": "get_latest_price",               "description": "Most recent PRICE observation"},
-            {"name": "get_trade_history",              "description": "BUY/SELL history, filterable by type"},
-            {"name": "insert_trade_event",             "description": "Insert a new ledger event"},
-            {"name": "check_database_health",          "description": "DB connectivity probe"},
+            {"name": "list_all_accounts",           "description": "List all distinct account IDs"},
+            {"name": "get_all_portfolio_summaries",  "description": "Net positions for ALL accounts (one query, use for risk scans)"},
+            {"name": "get_portfolio_summary",         "description": "Net position + cost basis per ticker for one account"},
+            {"name": "get_events_by_account",        "description": "All events for an account, with optional date range"},
+            {"name": "get_events_by_account_ticker", "description": "All events for a specific account + ticker"},
+            {"name": "get_events_by_ticker",         "description": "All events for a ticker across all accounts"},
+            {"name": "get_latest_price",             "description": "Most recent PRICE observation for a ticker"},
+            {"name": "get_trade_history",            "description": "BUY/SELL history, filterable by type and date range"},
+            {"name": "get_account_analysis_context", "description": "Pre-computed analysis context bundle for the o1 analyst agent"},
+            {"name": "run_query",                    "description": "Execute a custom read-only SELECT against the ledger"},
+            {"name": "insert_trade_event",           "description": "Insert a new ledger event"},
+            {"name": "check_database_health",        "description": "DB connectivity probe"},
         ],
         "structured_endpoints": {
-            "portfolio_summary": "GET /portfolio/{account_id}",
-            "trade_history":     "GET /portfolio/{account_id}/trades",
-            "account_events":    "GET /portfolio/{account_id}/events",
-            "latest_price":      "GET /ticker/{ticker_symbol}/price",
-            "ticker_events":     "GET /ticker/{ticker_symbol}/events",
-            "insert_event":      "POST /events",
+            "accounts":             "GET  /accounts",
+            "all_summaries":        "GET  /portfolio/summary/all",
+            "portfolio_summary":    "GET  /portfolio/{account_id}",
+            "trade_history":        "GET  /portfolio/{account_id}/trades",
+            "account_events":       "GET  /portfolio/{account_id}/events",
+            "account_ticker_events":  "GET  /portfolio/{account_id}/{ticker_symbol}/events",
+            "analysis_context":        "GET  /portfolio/{account_id}/analysis-context",
+            "latest_price":            "GET  /ticker/{ticker_symbol}/price",
+            "ticker_events":        "GET  /ticker/{ticker_symbol}/events",
+            "insert_event":         "POST /events",
+            "query":                "POST /query",
         },
     }

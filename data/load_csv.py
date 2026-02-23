@@ -63,7 +63,11 @@ def main():
             print(f"Applying DDL from {DDL_FILE} …")
             cur.execute(DDL_FILE.read_text())
 
-            # 2. Load CSV rows
+            # 2. Clear existing data before reload
+            print("Truncating existing rows …")
+            cur.execute("TRUNCATE TABLE portfolio_event_ledger RESTART IDENTITY")
+
+            # 3. Load CSV rows
             print(f"Loading {CSV_FILE} …")
             with CSV_FILE.open(newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)

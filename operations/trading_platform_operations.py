@@ -151,6 +151,27 @@ class TradingPlatformOperations:
             rows = await conn.fetch(query, *params) if params else await conn.fetch(query)
             return [dict(row) for row in rows] if rows else []
 
+    _FORBIDDEN_SQL = frozenset([
+        "insert", "update", "delete", "drop", "truncate", "alter", "create",
+        "replace", "upsert", "merge", "grant", "revoke", "copy", "vacuum",
+        "pg_", "information_schema",
+    ])
+
+    async def execute_read_query(
+        self, sql: str, params: tuple = None
+    ) -> List[Dict[str, Any]]:
+        """Execute a caller-supplied SELECT query with safety guardrails.
+        Rejects any statement that is not a SELECT or that contains DDL/DML keywords.
+        Results are always returned as a list of plain dicts.
+        """
+        normalized = sql.lower().strip()
+        if not normalized.startswith("select"):
+            raise ValueError("Only SELECT statements are permitted via execute_read_query.")
+        for kw in self._FORBIDDEN_SQL:
+            if kw in normalized:
+                raise ValueError(f"Forbidden keyword '{kw}' in query.")
+        return await self.execute_query(sql, params)
+
     @retry_on_db_error(max_retries=3)
     async def execute_update(self, query: str, params: tuple = None) -> None:
         """Execute an INSERT, UPDATE, or DELETE query.
@@ -193,81 +214,279 @@ class TradingPlatformOperations:
 
     @retry_on_db_error(max_retries=3)
     async def get_events_by_account(
-        self, account_id: str, limit: int = 100
+        self,
+        account_id: str,
+        start_ts: Optional[str] = None,
+        end_ts:   Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return all ledger events for a given account, newest first."""
+        """Return all ledger events for a given account, newest first.
+        Optionally filter to a date range via ISO 8601 start_ts / end_ts."""
         async with self._pool.acquire() as conn:
+            params: list = [account_id]
+            clauses = ["account_id = $1"]
+            if start_ts:
+                params.append(start_ts)
+                clauses.append(f"event_ts >= ${len(params)}")
+            if end_ts:
+                params.append(end_ts)
+                clauses.append(f"event_ts <= ${len(params)}")
+            where = " AND ".join(clauses)
             rows = await conn.fetch(
-                """
-                SELECT * FROM portfolio_event_ledger
-                WHERE account_id = $1
-                ORDER BY event_ts DESC
-                LIMIT $2
-                """,
-                account_id, limit,
+                f"SELECT * FROM portfolio_event_ledger WHERE {where} ORDER BY event_ts DESC",
+                *params,
             )
             return [dict(row) for row in rows]
 
     @retry_on_db_error(max_retries=3)
     async def get_events_by_ticker(
-        self, ticker_symbol: str, limit: int = 100
+        self,
+        ticker_symbol: str,
+        start_ts: Optional[str] = None,
+        end_ts:   Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return all ledger events for a given ticker, newest first."""
+        """Return all ledger events for a given ticker across all accounts, newest first.
+        Optionally filter to a date range via ISO 8601 start_ts / end_ts."""
         async with self._pool.acquire() as conn:
+            params: list = [ticker_symbol]
+            clauses = ["ticker_symbol = $1"]
+            if start_ts:
+                params.append(start_ts)
+                clauses.append(f"event_ts >= ${len(params)}")
+            if end_ts:
+                params.append(end_ts)
+                clauses.append(f"event_ts <= ${len(params)}")
+            where = " AND ".join(clauses)
             rows = await conn.fetch(
-                """
-                SELECT * FROM portfolio_event_ledger
-                WHERE ticker_symbol = $1
-                ORDER BY event_ts DESC
-                LIMIT $2
-                """,
-                ticker_symbol, limit,
+                f"SELECT * FROM portfolio_event_ledger WHERE {where} ORDER BY event_ts DESC",
+                *params,
             )
             return [dict(row) for row in rows]
 
     @retry_on_db_error(max_retries=3)
     async def get_events_by_account_and_ticker(
-        self, account_id: str, ticker_symbol: str, limit: int = 100
+        self,
+        account_id:    str,
+        ticker_symbol: str,
+        start_ts: Optional[str] = None,
+        end_ts:   Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return ledger events for a specific account + ticker, newest first."""
+        """Return ledger events for a specific account + ticker, newest first.
+        Optionally filter to a date range via ISO 8601 start_ts / end_ts."""
         async with self._pool.acquire() as conn:
+            params: list = [account_id, ticker_symbol]
+            clauses = ["account_id = $1", "ticker_symbol = $2"]
+            if start_ts:
+                params.append(start_ts)
+                clauses.append(f"event_ts >= ${len(params)}")
+            if end_ts:
+                params.append(end_ts)
+                clauses.append(f"event_ts <= ${len(params)}")
+            where = " AND ".join(clauses)
             rows = await conn.fetch(
-                """
-                SELECT * FROM portfolio_event_ledger
-                WHERE account_id = $1 AND ticker_symbol = $2
-                ORDER BY event_ts DESC
-                LIMIT $3
-                """,
-                account_id, ticker_symbol, limit,
+                f"SELECT * FROM portfolio_event_ledger WHERE {where} ORDER BY event_ts DESC",
+                *params,
             )
             return [dict(row) for row in rows]
 
     @retry_on_db_error(max_retries=3)
     async def get_portfolio_summary(self, account_id: str) -> List[Dict[str, Any]]:
-        """Return net share position and average cost per ticker for an account.
-        Considers BUY events as positive and SELL events as negative shares."""
+        """Return net position, cost basis, and most-recent PRICE per ticker for an account.
+        last_price is sourced from the chronologically latest PRICE event (not MAX price).
+        Adds last_price_ts so callers can detect stale price data."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
+                WITH ranked_prices AS (
+                    SELECT ticker_symbol, price_per_share, event_ts,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ticker_symbol
+                               ORDER BY event_ts DESC
+                           ) AS rn
+                    FROM portfolio_event_ledger
+                    WHERE account_id = $1 AND event_type = 'PRICE'
+                )
                 SELECT
-                    account_id,
-                    ticker_symbol,
-                    SUM(CASE WHEN event_type = 'BUY'  THEN shares
-                             WHEN event_type = 'SELL' THEN -shares
-                             ELSE 0 END)                          AS net_shares,
-                    SUM(CASE WHEN event_type = 'BUY'  THEN shares * price_per_share
-                             WHEN event_type = 'SELL' THEN -shares * price_per_share
-                             ELSE 0 END)                          AS net_cost,
-                    MAX(CASE WHEN event_type = 'PRICE' THEN price_per_share END) AS last_price,
-                    MAX(event_ts)                                 AS last_event_ts
-                FROM portfolio_event_ledger
-                WHERE account_id = $1
-                GROUP BY account_id, ticker_symbol
-                ORDER BY ticker_symbol
+                    t.account_id,
+                    t.ticker_symbol,
+                    SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares
+                             WHEN t.event_type = 'SELL' THEN -t.shares
+                             ELSE 0 END)                               AS net_shares,
+                    SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares * t.price_per_share
+                             WHEN t.event_type = 'SELL' THEN -t.shares * t.price_per_share
+                             ELSE 0 END)                               AS net_cost,
+                    rp.price_per_share                                 AS last_price,
+                    rp.event_ts                                        AS last_price_ts,
+                    MAX(t.event_ts)                                    AS last_event_ts
+                FROM portfolio_event_ledger t
+                LEFT JOIN ranked_prices rp
+                       ON rp.ticker_symbol = t.ticker_symbol AND rp.rn = 1
+                WHERE t.account_id = $1
+                GROUP BY t.account_id, t.ticker_symbol, rp.price_per_share, rp.event_ts
+                ORDER BY t.ticker_symbol
                 """,
                 account_id,
             )
             return [dict(row) for row in rows]
+
+    @retry_on_db_error(max_retries=3)
+    async def get_all_portfolio_summaries(self) -> List[Dict[str, Any]]:
+        """Return net positions across ALL accounts in a single query.
+        Identical logic to get_portfolio_summary but no account_id filter.
+        Efficient for full-portfolio risk scans."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH ranked_prices AS (
+                    SELECT account_id, ticker_symbol, price_per_share, event_ts,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY account_id, ticker_symbol
+                               ORDER BY event_ts DESC
+                           ) AS rn
+                    FROM portfolio_event_ledger
+                    WHERE event_type = 'PRICE'
+                )
+                SELECT
+                    t.account_id,
+                    t.ticker_symbol,
+                    SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares
+                             WHEN t.event_type = 'SELL' THEN -t.shares
+                             ELSE 0 END)                               AS net_shares,
+                    SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares * t.price_per_share
+                             WHEN t.event_type = 'SELL' THEN -t.shares * t.price_per_share
+                             ELSE 0 END)                               AS net_cost,
+                    rp.price_per_share                                 AS last_price,
+                    rp.event_ts                                        AS last_price_ts,
+                    MAX(t.event_ts)                                    AS last_event_ts
+                FROM portfolio_event_ledger t
+                LEFT JOIN ranked_prices rp
+                       ON rp.account_id = t.account_id
+                      AND rp.ticker_symbol = t.ticker_symbol
+                      AND rp.rn = 1
+                WHERE t.event_type IN ('BUY', 'SELL')
+                GROUP BY t.account_id, t.ticker_symbol, rp.price_per_share, rp.event_ts
+                ORDER BY t.account_id, t.ticker_symbol
+                """
+            )
+            return [dict(row) for row in rows]
+
+    @retry_on_db_error(max_retries=3)
+    async def get_account_analysis_context(
+        self, account_id: str
+    ) -> Dict[str, Any]:
+        """Return a fully pre-computed analysis context for one account,
+        ready for the InvestmentPortfolioAnalysisAgent (o1 model).
+        Derives: avg_cost_per_share, unrealized_pnl, portfolio_weight,
+        and summary metadata including anomaly flags."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH ranked_prices AS (
+                    SELECT ticker_symbol, price_per_share, event_ts,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ticker_symbol
+                               ORDER BY event_ts DESC
+                           ) AS rn
+                    FROM portfolio_event_ledger
+                    WHERE account_id = $1 AND event_type = 'PRICE'
+                ),
+                holdings AS (
+                    SELECT
+                        t.account_id,
+                        t.ticker_symbol,
+                        SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares ELSE 0 END)
+                            AS total_buy_shares,
+                        SUM(CASE WHEN t.event_type = 'SELL' THEN t.shares ELSE 0 END)
+                            AS total_sell_shares,
+                        SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares
+                                 WHEN t.event_type = 'SELL' THEN -t.shares
+                                 ELSE 0 END)
+                            AS net_shares,
+                        SUM(CASE WHEN t.event_type = 'BUY'  THEN t.shares * t.price_per_share
+                                 WHEN t.event_type = 'SELL' THEN -t.shares * t.price_per_share
+                                 ELSE 0 END)
+                            AS net_cost,
+                        rp.price_per_share  AS last_price,
+                        rp.event_ts         AS last_price_ts,
+                        MAX(t.event_ts)     AS last_event_ts
+                    FROM portfolio_event_ledger t
+                    LEFT JOIN ranked_prices rp
+                           ON rp.ticker_symbol = t.ticker_symbol AND rp.rn = 1
+                    WHERE t.account_id = $1
+                    GROUP BY t.account_id, t.ticker_symbol, rp.price_per_share, rp.event_ts
+                ),
+                portfolio_totals AS (
+                    SELECT
+                        SUM(CASE WHEN last_price IS NOT NULL AND net_shares > 0
+                                 THEN net_shares * last_price ELSE 0 END)
+                            AS total_market_value,
+                        COUNT(*)
+                            AS total_positions,
+                        SUM(CASE WHEN last_price IS NOT NULL THEN 1 ELSE 0 END)
+                            AS positions_with_price,
+                        SUM(CASE WHEN last_price IS NULL THEN 1 ELSE 0 END)
+                            AS positions_no_price
+                    FROM holdings
+                )
+                SELECT
+                    h.account_id,
+                    h.ticker_symbol,
+                    h.net_shares,
+                    h.net_cost,
+                    h.last_price,
+                    h.last_price_ts,
+                    h.last_event_ts,
+                    h.total_buy_shares,
+                    h.total_sell_shares,
+                    CASE WHEN h.total_buy_shares > 0
+                         THEN h.net_cost / h.total_buy_shares
+                         ELSE NULL END                                         AS avg_cost_per_share,
+                    CASE WHEN h.last_price IS NOT NULL
+                         THEN h.net_shares * h.last_price - h.net_cost
+                         ELSE NULL END                                         AS unrealized_pnl,
+                    CASE WHEN h.last_price IS NOT NULL AND pt.total_market_value > 0
+                         THEN (h.net_shares * h.last_price) / pt.total_market_value
+                         ELSE NULL END                                         AS portfolio_weight,
+                    pt.total_market_value,
+                    pt.total_positions,
+                    pt.positions_with_price,
+                    pt.positions_no_price
+                FROM holdings h
+                CROSS JOIN portfolio_totals pt
+                ORDER BY
+                    CASE WHEN h.last_price IS NOT NULL THEN h.net_shares * h.last_price ELSE 0 END DESC
+                """,
+                account_id,
+            )
+            if not rows:
+                return {"account_id": account_id, "holdings": [], "summary": None}
+
+            # Extract summary metadata from first row (same for all rows)
+            first = dict(rows[0])
+            summary = {
+                "account_id":           account_id,
+                "total_market_value":   float(first["total_market_value"] or 0),
+                "total_positions":      int(first["total_positions"]),
+                "positions_with_price": int(first["positions_with_price"]),
+                "positions_no_price":   int(first["positions_no_price"]),
+            }
+
+            holdings = []
+            for row in rows:
+                r = dict(row)
+                holdings.append({
+                    "account_id":          r["account_id"],
+                    "ticker_symbol":       r["ticker_symbol"],
+                    "net_shares":          float(r["net_shares"] or 0),
+                    "net_cost":            float(r["net_cost"] or 0),
+                    "last_price":          float(r["last_price"]) if r["last_price"] is not None else None,
+                    "last_price_ts":       str(r["last_price_ts"]) if r["last_price_ts"] else None,
+                    "last_event_ts":       str(r["last_event_ts"]) if r["last_event_ts"] else None,
+                    "avg_cost_per_share":  float(r["avg_cost_per_share"]) if r["avg_cost_per_share"] is not None else None,
+                    "unrealized_pnl":      float(r["unrealized_pnl"]) if r["unrealized_pnl"] is not None else None,
+                    "portfolio_weight":    float(r["portfolio_weight"]) if r["portfolio_weight"] is not None else None,
+                })
+
+            return {"account_id": account_id, "summary": summary, "holdings": holdings}
 
     @retry_on_db_error(max_retries=3)
     async def get_latest_price(
@@ -292,58 +511,41 @@ class TradingPlatformOperations:
         self,
         account_id: str,
         event_type: Optional[str] = None,
-        limit: int = 100,
+        start_ts:   Optional[str] = None,
+        end_ts:     Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return BUY/SELL trade history for an account, optionally filtered by event_type."""
+        """Return BUY/SELL trade history for an account.
+        Optionally filter by event_type and/or a date range."""
         async with self._pool.acquire() as conn:
+            params: list = [account_id]
             if event_type:
-                rows = await conn.fetch(
-                    """
-                    SELECT * FROM portfolio_event_ledger
-                    WHERE account_id = $1 AND event_type = $2
-                    ORDER BY event_ts DESC
-                    LIMIT $3
-                    """,
-                    account_id, event_type, limit,
-                )
+                params.append(event_type)
+                type_clause = f"event_type = ${len(params)}"
             else:
-                rows = await conn.fetch(
-                    """
-                    SELECT * FROM portfolio_event_ledger
-                    WHERE account_id = $1 AND event_type IN ('BUY', 'SELL')
-                    ORDER BY event_ts DESC
-                    LIMIT $2
-                    """,
-                    account_id, limit,
-                )
+                type_clause = "event_type IN ('BUY', 'SELL')"
+            clauses = ["account_id = $1", type_clause]
+            if start_ts:
+                params.append(start_ts)
+                clauses.append(f"event_ts >= ${len(params)}")
+            if end_ts:
+                params.append(end_ts)
+                clauses.append(f"event_ts <= ${len(params)}")
+            where = " AND ".join(clauses)
+            rows = await conn.fetch(
+                f"SELECT * FROM portfolio_event_ledger WHERE {where} ORDER BY event_ts DESC",
+                *params,
+            )
             return [dict(row) for row in rows]
 
-            g.close()
-
-    def search_code(self, query: str) -> List[str]:
-        try:
-            g = Github(pat, per_page=100)
-            results = g.search_code(query=query)
-            code_snippets = [result.code for result in results]
-            return code_snippets
-        except Exception as e:
-            print(f"An error occurred with GitHubOperations.search_code: {e}")
-            return []
-        finally:
-            g.close()
-
-    def create_issue(self, repo: str, title: str, body: str) -> str:
-        try:
-            g = Github(pat, per_page=100)
-            repository = g.get_repo(repo)
-            if not repository:
-                raise ValueError(f"Repository '{repo}' not found.")
-            
-            issue = repository.create_issue(title=title, body=body)
-            return f"Issue created successfully: {issue.html_url}"
-        except Exception as e:
-            print(f"An error occurred with GitHubOperations.create_issue: {e}")
-            return ""
-        finally:
-            g.close()
-    
+    @retry_on_db_error(max_retries=3)
+    async def get_all_accounts(self) -> List[str]:
+        """Return a sorted list of all distinct account IDs in the ledger."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT account_id
+                FROM portfolio_event_ledger
+                ORDER BY account_id
+                """
+            )
+            return [row["account_id"] for row in rows]
